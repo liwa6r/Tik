@@ -24,11 +24,29 @@ logger = logging.getLogger(__name__)
 # ─── التوكن من متغير البيئة ──────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# ─── نمط رابط تيك توك ───────────────────────────────────────────────────────
-TIKTOK_PATTERN = re.compile(
-    r"(https?://)?(www\.)?(vm\.tiktok\.com|tiktok\.com|vt\.tiktok\.com)"
-    r"(/[^\s]*)?"
-)
+# ─── أنماط الروابط المدعومة ──────────────────────────────────────────────────
+SUPPORTED_PATTERNS = {
+    "TikTok": re.compile(
+        r"https?://(www\.)?(vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com)/[^\s]+"
+    ),
+    "Instagram": re.compile(
+        r"https?://(www\.)?instagram\.com/(p|reel|tv|stories)/[^\s]+"
+    ),
+}
+
+# أيقونات المنصات
+PLATFORM_ICONS = {
+    "TikTok": "🎵",
+    "Instagram": "📸",
+}
+
+
+def detect_platform(url: str) -> str | None:
+    """يكتشف المنصة من الرابط ويُعيد اسمها أو None."""
+    for platform, pattern in SUPPORTED_PATTERNS.items():
+        if pattern.search(url):
+            return platform
+    return None
 
 
 def auto_update_ytdlp() -> None:
@@ -45,9 +63,9 @@ def auto_update_ytdlp() -> None:
         logger.warning(f"تعذّر تحديث yt-dlp: {e}")
 
 
-def download_tiktok(url: str) -> str | None:
+def download_video(url: str, platform: str) -> str | None:
     """
-    تحميل فيديو تيك توك بدون علامة مائية باستخدام yt-dlp.
+    تحميل الفيديو من أي منصة مدعومة باستخدام yt-dlp.
     يُعيد مسار الملف المحمّل أو None عند الفشل.
     """
     tmp_dir = tempfile.mkdtemp()
@@ -61,13 +79,18 @@ def download_tiktok(url: str) -> str | None:
         "--merge-output-format", "mp4",
         "--no-playlist",
         "-o", output_template,
-        url,
     ]
+
+    # إعدادات خاصة بانستقرام
+    if platform == "Instagram":
+        cmd += ["--add-header", "User-Agent:Mozilla/5.0"]
+
+    cmd.append(url)
 
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
     except subprocess.CalledProcessError as e:
-        logger.error(f"yt-dlp error: {e.stderr}")
+        logger.error(f"yt-dlp error [{platform}]: {e.stderr}")
         return None
     except subprocess.TimeoutExpired:
         logger.error("انتهت مهلة التحميل")
@@ -86,18 +109,23 @@ def download_tiktok(url: str) -> str | None:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 أهلاً! أرسل لي رابط فيديو تيك توك وسأرسله لك بدون علامة مائية 🎬\n\n"
-        "مثال:\nhttps://www.tiktok.com/@user/video/123456789"
+        "👋 أهلاً! أرسل لي رابط فيديو وسأحمّله لك بدون علامة مائية 🎬\n\n"
+        "المنصات المدعومة:\n"
+        "🎵 TikTok\n"
+        "📸 Instagram (Reels, Posts, Stories)\n\n"
+        "فقط أرسل الرابط مباشرة!"
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📌 *طريقة الاستخدام:*\n\n"
-        "1. انسخ رابط أي فيديو تيك توك\n"
+        "1. انسخ رابط الفيديو من التطبيق\n"
         "2. أرسله هنا مباشرة\n"
-        "3. انتظر ثوانٍ وستصلك الفيديو بدون علامة مائية ✅\n\n"
-        "يدعم الروابط المختصرة مثل vm.tiktok.com و vt.tiktok.com",
+        "3. انتظر ثوانٍ وستصلك الفيديو ✅\n\n"
+        "*المنصات المدعومة:*\n"
+        "🎵 TikTok — بدون علامة مائية\n"
+        "📸 Instagram — Reels & Posts & Stories",
         parse_mode="Markdown",
     )
 
@@ -105,28 +133,45 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text or ""
 
-    # التحقق من وجود رابط تيك توك
-    match = TIKTOK_PATTERN.search(text)
-    if not match:
+    # استخراج أول رابط في الرسالة
+    url_match = re.search(r"https?://[^\s]+", text)
+    if not url_match:
         await update.message.reply_text(
-            "⚠️ لم أجد رابط تيك توك صحيح.\n"
-            "أرسل رابطاً مثل: https://www.tiktok.com/@user/video/123456789"
+            "⚠️ لم أجد رابطاً صحيحاً في رسالتك.\n\n"
+            "أرسل رابطاً من:\n"
+            "🎵 TikTok\n"
+            "📸 Instagram"
         )
         return
 
-    url = match.group(0)
-    if not url.startswith("http"):
-        url = "https://" + url
+    url = url_match.group(0)
+    platform = detect_platform(url)
 
-    processing_msg = await update.message.reply_text("⏳ جاري التحميل، انتظر لحظة...")
+    if platform is None:
+        await update.message.reply_text(
+            "⚠️ هذا الرابط غير مدعوم حالياً.\n\n"
+            "المنصات المدعومة:\n"
+            "🎵 TikTok\n"
+            "📸 Instagram"
+        )
+        return
+
+    icon = PLATFORM_ICONS[platform]
+    processing_msg = await update.message.reply_text(
+        f"{icon} جاري تحميل الفيديو من {platform}، انتظر لحظة..."
+    )
 
     # التحميل في thread منفصل لعدم تجميد البوت
     loop = asyncio.get_event_loop()
-    file_path = await loop.run_in_executor(None, download_tiktok, url)
+    file_path = await loop.run_in_executor(None, download_video, url, platform)
 
     if file_path is None:
         await processing_msg.edit_text(
-            "❌ فشل التحميل. تأكد من صحة الرابط أو حاول مرة أخرى."
+            f"❌ فشل التحميل من {platform}.\n"
+            "تأكد من:\n"
+            "• صحة الرابط\n"
+            "• أن الحساب غير خاص (Private)\n"
+            "ثم حاول مرة أخرى."
         )
         return
 
@@ -144,7 +189,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         with open(file_path, "rb") as video_file:
             await update.message.reply_video(
                 video=video_file,
-                caption="✅ تم التحميل بدون علامة مائية\n🤖 @dirtiktok_bot",
+                caption=f"✅ تم التحميل من {platform} {icon}\n🤖 @dirtiktok_bot",
                 supports_streaming=True,
             )
         await processing_msg.delete()
@@ -152,7 +197,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"خطأ في الإرسال: {e}")
         await processing_msg.edit_text("❌ حدث خطأ أثناء إرسال الفيديو.")
     finally:
-        # حذف الملف المؤقت
         try:
             os.remove(file_path)
         except Exception:
@@ -175,7 +219,7 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("البوت يعمل الآن ✅")
+    logger.info("البوت يعمل الآن ✅ — يدعم TikTok و Instagram")
     app.run_polling(drop_pending_updates=True)
 
 
